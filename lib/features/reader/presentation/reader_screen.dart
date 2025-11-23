@@ -6,7 +6,6 @@ import 'package:lucide_icons/lucide_icons.dart';
 import 'package:page_flip/page_flip.dart';
 import 'package:pdfrx/pdfrx.dart';
 import 'package:lumina_pdf_reader/features/home/presentation/home_providers.dart';
-import 'package:lumina_pdf_reader/features/home/data/book_repository.dart';
 import 'package:lumina_pdf_reader/features/reader/presentation/reader_controller.dart';
 
 class ReaderScreen extends ConsumerStatefulWidget {
@@ -18,11 +17,21 @@ class ReaderScreen extends ConsumerStatefulWidget {
 }
 
 class _ReaderScreenState extends ConsumerState<ReaderScreen> {
-  final _controller = GlobalKey<PageFlipWidgetState>();
+  final _flipKey = GlobalKey<PageFlipWidgetState>();
   bool _showControls = true;
   int _totalPages = 0;
   int _currentPage = 0;
-  bool _isInitialized = false;
+  bool _hasInitialized = false;
+  bool _hasNavigatedToSavedPage = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Invalidate book provider immediately to force fresh data
+    Future.microtask(() {
+      ref.invalidate(bookProvider(widget.bookId));
+    });
+  }
 
   void _toggleControls() {
     setState(() => _showControls = !_showControls);
@@ -30,16 +39,42 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
 
   /// Initialize page state from loaded document and book data
   void _initializePages(int documentPages, int savedCurrentPage) {
-    if (!_isInitialized) {
-      _isInitialized = true;
-      // Use post frame callback to avoid setState during build
+    debugPrint('📖 _initializePages: docPages=$documentPages, savedPage=$savedCurrentPage, hasInit=$_hasInitialized, hasNav=$_hasNavigatedToSavedPage');
+
+    if (!_hasInitialized && documentPages > 0) {
+      _hasInitialized = true;
+
+      final maxPage = documentPages - 1;
+      final targetPage = savedCurrentPage.clamp(0, maxPage);
+
+      debugPrint('📖 First init - setting totalPages=$documentPages, currentPage=$targetPage');
+
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) {
           setState(() {
             _totalPages = documentPages;
-            // Validate saved page is within bounds
-            _currentPage = savedCurrentPage.clamp(0, documentPages - 1);
+            _currentPage = targetPage;
           });
+        }
+      });
+    }
+
+    // Navigate to saved page only ONCE after PageFlipWidget is ready
+    if (!_hasNavigatedToSavedPage && _hasInitialized && savedCurrentPage > 0) {
+      _hasNavigatedToSavedPage = true;
+
+      final maxPage = documentPages - 1;
+      final targetPage = savedCurrentPage.clamp(0, maxPage);
+
+      debugPrint('📖 Scheduling navigation to page $targetPage');
+
+      Future.delayed(const Duration(milliseconds: 600), () {
+        if (mounted && _flipKey.currentState != null) {
+          debugPrint('📖 NOW navigating to page $targetPage');
+          _flipKey.currentState!.goToPage(targetPage);
+          setState(() => _currentPage = targetPage);
+        } else {
+          debugPrint('📖 Cannot navigate - widget not ready');
         }
       });
     }
@@ -48,21 +83,23 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   Future<void> _saveProgress() async {
     final bookId = int.tryParse(widget.bookId) ?? -1;
 
+    debugPrint('📖 _saveProgress: bookId=$bookId, currentPage=$_currentPage, totalPages=$_totalPages');
+
     if (_totalPages > 0 && bookId != -1) {
       await ref.read(bookRepositoryProvider).updateProgress(
         bookId,
         _currentPage,
         _totalPages,
       );
+      debugPrint('📖 Progress saved!');
     }
   }
 
   Future<bool> _handleExit() async {
-    // Save progress first
     await _saveProgress();
-    // Invalidate providers BEFORE navigation completes
     ref.invalidate(recentBooksProvider);
     ref.invalidate(allBooksProvider);
+    ref.invalidate(bookProvider(widget.bookId));
     return true;
   }
 
@@ -70,9 +107,16 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
     if (page < 0 || page >= _totalPages) return;
 
     setState(() => _currentPage = page);
-    _controller.currentState?.goToPage(page);
-    // Save progress on every page change
+    _flipKey.currentState?.goToPage(page);
     _saveProgress();
+  }
+
+  void _onPageFlipChanged(int page) {
+    debugPrint('📖 onPageFlipChanged: page=$page, current=$_currentPage');
+    if (mounted && page != _currentPage) {
+      setState(() => _currentPage = page);
+      _saveProgress();
+    }
   }
 
   @override
@@ -86,6 +130,9 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
         body: bookAsync.when(
           data: (book) {
             if (book == null) return const Center(child: Text('Book not found'));
+
+            debugPrint('📖 BUILD: book.currentPage=${book.currentPage}');
+
             return Stack(
               children: [
                 // PDF View with PageFlip
@@ -96,45 +143,34 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                     builder: (context, document) {
                       if (document == null) return const Center(child: CircularProgressIndicator());
 
-                      // Initialize pages with setState via post frame callback
-                      _initializePages(document.pages.length, book.currentPage);
+                      final docPages = document.pages.length;
 
-                      // Use local values for initial render, state values after init
-                      final effectiveTotalPages = _isInitialized ? _totalPages : document.pages.length;
-                      final effectiveCurrentPage = _isInitialized
-                          ? _currentPage
-                          : book.currentPage.clamp(0, document.pages.length - 1);
+                      // Initialize pages
+                      _initializePages(docPages, book.currentPage);
 
-                      return GestureDetector(
-                        onHorizontalDragEnd: (details) {
-                          // Detect swipe direction and update page
-                          if (details.primaryVelocity != null && _isInitialized) {
-                            if (details.primaryVelocity! < -100 && _currentPage < _totalPages - 1) {
-                              // Swipe left = next page
-                              _goToPage(_currentPage + 1);
-                            } else if (details.primaryVelocity! > 100 && _currentPage > 0) {
-                              // Swipe right = previous page
-                              _goToPage(_currentPage - 1);
-                            }
-                          }
-                        },
-                        child: PageFlipWidget(
-                          key: _controller,
-                          backgroundColor: Colors.black,
-                          initialIndex: effectiveCurrentPage,
-                          duration: const Duration(milliseconds: 800),
-                          lastPage: Container(
-                            color: Colors.white,
-                            child: const Center(child: Text('The End')),
+                      // Calculate safe initial index for PageFlipWidget
+                      final safeInitialIndex = book.currentPage.clamp(0, docPages > 0 ? docPages - 1 : 0);
+
+                      if (docPages == 0) {
+                        return const Center(child: Text('No pages', style: TextStyle(color: Colors.white)));
+                      }
+
+                      return PageFlipWidget(
+                        key: _flipKey,
+                        backgroundColor: Colors.black,
+                        initialIndex: safeInitialIndex,
+                        duration: const Duration(milliseconds: 450),
+                        onPageFlipped: _onPageFlipChanged,
+                        lastPage: Container(
+                          color: Colors.white,
+                          child: const Center(
+                            child: Text('The End', style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
                           ),
-                          children: [
-                            for (var i = 0; i < effectiveTotalPages; i++)
-                              _PdfPageRenderer(
-                                document: document,
-                                pageNumber: i + 1,
-                              ),
-                          ],
                         ),
+                        children: [
+                          for (var i = 0; i < docPages; i++)
+                            _PdfPageRenderer(document: document, pageNumber: i + 1),
+                        ],
                       );
                     },
                   ),
@@ -178,10 +214,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                               if (_totalPages > 0)
                                 Text(
                                   'Page ${_currentPage + 1} of $_totalPages',
-                                  style: GoogleFonts.inter(
-                                    color: Colors.white60,
-                                    fontSize: 12,
-                                  ),
+                                  style: GoogleFonts.inter(color: Colors.white60, fontSize: 12),
                                 ),
                             ],
                           ),
@@ -195,7 +228,7 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                   ),
                 ),
 
-                // Bottom Bar with Page Navigation
+                // Bottom Bar
                 AnimatedPositioned(
                   duration: const Duration(milliseconds: 200),
                   bottom: _showControls ? 0 : -100,
@@ -207,40 +240,27 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceAround,
                       children: [
-                        // Previous Page Button
                         IconButton(
                           icon: Icon(
                             LucideIcons.chevronLeft,
-                            color: (_isInitialized && _currentPage > 0)
-                                ? Colors.white
-                                : Colors.white38,
+                            color: _currentPage > 0 ? Colors.white : Colors.white38,
                           ),
-                          onPressed: (_isInitialized && _currentPage > 0)
-                              ? () => _goToPage(_currentPage - 1)
-                              : null,
+                          onPressed: _currentPage > 0 ? () => _goToPage(_currentPage - 1) : null,
                         ),
-                        // Page Counter
                         Text(
-                          _isInitialized
-                              ? '${_currentPage + 1} / $_totalPages'
-                              : '1 / 0',
+                          _totalPages > 0 ? '${_currentPage + 1} / $_totalPages' : '...',
                           style: GoogleFonts.inter(
                             color: Colors.white,
                             fontSize: 16,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
-                        // Next Page Button
                         IconButton(
                           icon: Icon(
                             LucideIcons.chevronRight,
-                            color: (_isInitialized && _currentPage < _totalPages - 1)
-                                ? Colors.white
-                                : Colors.white38,
+                            color: _currentPage < _totalPages - 1 ? Colors.white : Colors.white38,
                           ),
-                          onPressed: (_isInitialized && _currentPage < _totalPages - 1)
-                              ? () => _goToPage(_currentPage + 1)
-                              : null,
+                          onPressed: _currentPage < _totalPages - 1 ? () => _goToPage(_currentPage + 1) : null,
                         ),
                       ],
                     ),
@@ -263,10 +283,7 @@ class _PdfPageRenderer extends StatelessWidget {
   final PdfDocument document;
   final int pageNumber;
 
-  const _PdfPageRenderer({
-    required this.document,
-    required this.pageNumber,
-  });
+  const _PdfPageRenderer({required this.document, required this.pageNumber});
 
   @override
   Widget build(BuildContext context) {
@@ -280,17 +297,16 @@ class _PdfPageRenderer extends StatelessWidget {
             pageNumber: pageNumber,
             alignment: Alignment.center,
           ),
-          // Gradient overlay for spine/depth effect
           Container(
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.centerLeft,
                 end: Alignment.centerRight,
                 colors: [
-                  Colors.black.withOpacity(0.1), // Spine shadow
+                  Colors.black.withOpacity(0.1),
                   Colors.transparent,
                   Colors.transparent,
-                  Colors.black.withOpacity(0.05), // Page edge shadow
+                  Colors.black.withOpacity(0.05),
                 ],
                 stops: const [0.0, 0.1, 0.9, 1.0],
               ),
