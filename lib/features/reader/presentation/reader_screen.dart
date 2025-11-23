@@ -22,31 +22,57 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
   bool _showControls = true;
   int _totalPages = 0;
   int _currentPage = 0;
+  bool _isInitialized = false;
 
   void _toggleControls() {
     setState(() => _showControls = !_showControls);
   }
 
-  Future<void> _saveProgressBeforeExit() async {
+  /// Initialize page state from loaded document and book data
+  void _initializePages(int documentPages, int savedCurrentPage) {
+    if (!_isInitialized) {
+      _isInitialized = true;
+      // Use post frame callback to avoid setState during build
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          setState(() {
+            _totalPages = documentPages;
+            // Validate saved page is within bounds
+            _currentPage = savedCurrentPage.clamp(0, documentPages - 1);
+          });
+        }
+      });
+    }
+  }
+
+  Future<void> _saveProgress() async {
     final bookId = int.tryParse(widget.bookId) ?? -1;
-    
+
     if (_totalPages > 0 && bookId != -1) {
       await ref.read(bookRepositoryProvider).updateProgress(
         bookId,
         _currentPage,
         _totalPages,
       );
-      
-      // Force refresh providers
-      await Future.delayed(const Duration(milliseconds: 200));
-      ref.invalidate(recentBooksProvider);
-      ref.invalidate(allBooksProvider);
     }
   }
 
   Future<bool> _handleExit() async {
-    await _saveProgressBeforeExit();
-    return true; // Allow navigation
+    // Save progress first
+    await _saveProgress();
+    // Invalidate providers BEFORE navigation completes
+    ref.invalidate(recentBooksProvider);
+    ref.invalidate(allBooksProvider);
+    return true;
+  }
+
+  void _goToPage(int page) {
+    if (page < 0 || page >= _totalPages) return;
+
+    setState(() => _currentPage = page);
+    _controller.currentState?.goToPage(page);
+    // Save progress on every page change
+    _saveProgress();
   }
 
   @override
@@ -69,40 +95,39 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                     book.filePath,
                     builder: (context, document) {
                       if (document == null) return const Center(child: CircularProgressIndicator());
-                      
-                      if (_totalPages == 0) {
-                        _totalPages = document.pages.length;
-                        _currentPage = book.currentPage;
-                      }
-                      
-                      return NotificationListener<ScrollNotification>(
-                        onNotification: (notification) {
-                          if (notification is ScrollUpdateNotification) {
-                            final page = (notification.metrics as PageMetrics).page?.round() ?? _currentPage;
-                            if (page != _currentPage) {
-                              setState(() => _currentPage = page);
-                              _saveProgressBeforeExit();
-                            }
-                          }
-                          return false;
-                        },
-                        child: PageFlipWidget(
-                          key: _controller,
-                          backgroundColor: Colors.black,
-                          initialIndex: book.currentPage,
-                          duration: const Duration(milliseconds: 800),
-                          lastPage: Container(
-                            color: Colors.white,
-                            child: const Center(child: Text('The End')),
-                          ),
-                          children: [
-                            for (var i = 0; i < document.pages.length; i++)
-                              _PdfPageRenderer(
-                                document: document,
-                                pageNumber: i + 1,
-                              ),
-                          ],
+
+                      // Initialize pages with setState via post frame callback
+                      _initializePages(document.pages.length, book.currentPage);
+
+                      // Use local values for initial render, state values after init
+                      final effectiveTotalPages = _isInitialized ? _totalPages : document.pages.length;
+                      final effectiveCurrentPage = _isInitialized
+                          ? _currentPage
+                          : book.currentPage.clamp(0, document.pages.length - 1);
+
+                      return PageFlipWidget(
+                        key: _controller,
+                        backgroundColor: Colors.black,
+                        initialIndex: effectiveCurrentPage,
+                        duration: const Duration(milliseconds: 800),
+                        lastPage: Container(
+                          color: Colors.white,
+                          child: const Center(child: Text('The End')),
                         ),
+                        onFlip: (index) {
+                          // Update state when user manually flips pages
+                          if (index != _currentPage && _isInitialized) {
+                            setState(() => _currentPage = index);
+                            _saveProgress();
+                          }
+                        },
+                        children: [
+                          for (var i = 0; i < effectiveTotalPages; i++)
+                            _PdfPageRenderer(
+                              document: document,
+                              pageNumber: i + 1,
+                            ),
+                        ],
                       );
                     },
                   ),
@@ -124,7 +149,10 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                       children: [
                         IconButton(
                           icon: const Icon(LucideIcons.arrowLeft, color: Colors.white),
-                          onPressed: _handleExit,
+                          onPressed: () async {
+                            await _handleExit();
+                            if (context.mounted) context.pop();
+                          },
                         ),
                         Expanded(
                           child: Column(
@@ -174,18 +202,21 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                       children: [
                         // Previous Page Button
                         IconButton(
-                          icon: const Icon(LucideIcons.chevronLeft, color: Colors.white),
-                          onPressed: _currentPage > 0
-                              ? () {
-                                  setState(() => _currentPage--);
-                                  // Navigate PageFlipWidget to previous page
-                                  _controller.currentState?.goToPage(_currentPage);
-                                }
+                          icon: Icon(
+                            LucideIcons.chevronLeft,
+                            color: (_isInitialized && _currentPage > 0)
+                                ? Colors.white
+                                : Colors.white38,
+                          ),
+                          onPressed: (_isInitialized && _currentPage > 0)
+                              ? () => _goToPage(_currentPage - 1)
                               : null,
                         ),
                         // Page Counter
                         Text(
-                          '${_currentPage + 1} / $_totalPages',
+                          _isInitialized
+                              ? '${_currentPage + 1} / $_totalPages'
+                              : '1 / 0',
                           style: GoogleFonts.inter(
                             color: Colors.white,
                             fontSize: 16,
@@ -194,13 +225,14 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                         ),
                         // Next Page Button
                         IconButton(
-                          icon: const Icon(LucideIcons.chevronRight, color: Colors.white),
-                          onPressed: _currentPage < _totalPages - 1
-                              ? () {
-                                  setState(() => _currentPage++);
-                                  // Navigate PageFlipWidget to next page
-                                  _controller.currentState?.goToPage(_currentPage);
-                                }
+                          icon: Icon(
+                            LucideIcons.chevronRight,
+                            color: (_isInitialized && _currentPage < _totalPages - 1)
+                                ? Colors.white
+                                : Colors.white38,
+                          ),
+                          onPressed: (_isInitialized && _currentPage < _totalPages - 1)
+                              ? () => _goToPage(_currentPage + 1)
                               : null,
                         ),
                       ],
