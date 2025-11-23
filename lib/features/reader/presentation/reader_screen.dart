@@ -105,29 +105,36 @@ class _ReaderScreenState extends ConsumerState<ReaderScreen> {
                           ? _currentPage
                           : book.currentPage.clamp(0, document.pages.length - 1);
 
-                      return PageFlipWidget(
-                        key: _controller,
-                        backgroundColor: Colors.black,
-                        initialIndex: effectiveCurrentPage,
-                        duration: const Duration(milliseconds: 800),
-                        lastPage: Container(
-                          color: Colors.white,
-                          child: const Center(child: Text('The End')),
-                        ),
-                        onFlip: (index) {
-                          // Update state when user manually flips pages
-                          if (index != _currentPage && _isInitialized) {
-                            setState(() => _currentPage = index);
-                            _saveProgress();
+                      return GestureDetector(
+                        onHorizontalDragEnd: (details) {
+                          // Detect swipe direction and update page
+                          if (details.primaryVelocity != null && _isInitialized) {
+                            if (details.primaryVelocity! < -100 && _currentPage < _totalPages - 1) {
+                              // Swipe left = next page
+                              _goToPage(_currentPage + 1);
+                            } else if (details.primaryVelocity! > 100 && _currentPage > 0) {
+                              // Swipe right = previous page
+                              _goToPage(_currentPage - 1);
+                            }
                           }
                         },
-                        children: [
-                          for (var i = 0; i < effectiveTotalPages; i++)
-                            _PdfPageRenderer(
-                              document: document,
-                              pageNumber: i + 1,
-                            ),
-                        ],
+                        child: PageFlipWidget(
+                          key: _controller,
+                          backgroundColor: Colors.black,
+                          initialIndex: effectiveCurrentPage,
+                          duration: const Duration(milliseconds: 800),
+                          lastPage: Container(
+                            color: Colors.white,
+                            child: const Center(child: Text('The End')),
+                          ),
+                          children: [
+                            for (var i = 0; i < effectiveTotalPages; i++)
+                              _PdfPageRenderer(
+                                document: document,
+                                pageNumber: i + 1,
+                              ),
+                          ],
+                        ),
                       );
                     },
                   ),
