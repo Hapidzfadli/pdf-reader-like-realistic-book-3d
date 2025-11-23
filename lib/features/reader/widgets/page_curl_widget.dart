@@ -1,4 +1,3 @@
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 /// Custom page curl widget that provides 3D curl effect
@@ -32,11 +31,21 @@ class PageCurlWidgetState extends State<PageCurlWidget>
   @override
   void initState() {
     super.initState();
-    _currentPage = widget.initialPage;
+    _currentPage = widget.initialPage.clamp(0, widget.pages.length - 1);
     _animationController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 600),
     );
+  }
+
+  @override
+  void didUpdateWidget(PageCurlWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // Update current page if initialPage changed and pages are different
+    if (widget.initialPage != oldWidget.initialPage &&
+        widget.pages.length != oldWidget.pages.length) {
+      _currentPage = widget.initialPage.clamp(0, widget.pages.length - 1);
+    }
   }
 
   @override
@@ -49,14 +58,12 @@ class PageCurlWidgetState extends State<PageCurlWidget>
     final size = context.size;
     if (size == null) return;
 
-    // Only allow drag from right half of screen
-    if (details.localPosition.dx > size.width * 0.5) {
-      setState(() {
-        _dragStart = details.localPosition;
-        _dragUpdate = details.localPosition;
-        _isCurling = true;
-      });
-    }
+    // Allow drag from any position
+    setState(() {
+      _dragStart = details.localPosition;
+      _dragUpdate = details.localPosition;
+      _isCurling = true;
+    });
   }
 
   void _onPanUpdate(DragUpdateDetails details) {
@@ -75,17 +82,14 @@ class PageCurlWidgetState extends State<PageCurlWidget>
 
     // Check if drag was significant enough to turn page
     final dragDistance = _dragUpdate!.dx - _dragStart!.dx;
-    final shouldTurnPage = dragDistance.abs() > size.width * 0.3;
+    final shouldTurnPage = dragDistance.abs() > size.width * 0.2; // Reduced threshold for easier swipe
 
     if (shouldTurnPage && dragDistance < 0 && _currentPage < widget.pages.length - 1) {
-      // Turn to next page
-      _animatePageTurn(true);
+      // Swipe left = next page
+      _turnPage(true);
     } else if (shouldTurnPage && dragDistance > 0 && _currentPage > 0) {
-      // Turn to previous page
-      _animatePageTurn(false);
-    } else {
-      // Snap back
-      _animationController.reverse();
+      // Swipe right = previous page
+      _turnPage(false);
     }
 
     setState(() {
@@ -95,13 +99,14 @@ class PageCurlWidgetState extends State<PageCurlWidget>
     });
   }
 
-  void _animatePageTurn(bool forward) {
-    _animationController.forward(from: 0).then((_) {
-      setState(() {
-        _currentPage = forward ? _currentPage + 1 : _currentPage - 1;
-        widget.onPageChanged?.call(_currentPage);
-      });
-      _animationController.reset();
+  void _turnPage(bool forward) {
+    setState(() {
+      if (forward && _currentPage < widget.pages.length - 1) {
+        _currentPage++;
+      } else if (!forward && _currentPage > 0) {
+        _currentPage--;
+      }
+      widget.onPageChanged?.call(_currentPage);
     });
   }
 
