@@ -135,15 +135,34 @@ class _HomeContent extends ConsumerStatefulWidget {
   ConsumerState<_HomeContent> createState() => _HomeContentState();
 }
 
-class _HomeContentState extends ConsumerState<_HomeContent> {
+class _HomeContentState extends ConsumerState<_HomeContent> with WidgetsBindingObserver {
   @override
   void initState() {
     super.initState();
-    // Refresh providers when screen loads to get latest data
+    WidgetsBinding.instance.addObserver(this);
+    _refreshData();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Refresh when app comes back to foreground
+    if (state == AppLifecycleState.resumed) {
+      _refreshData();
+    }
+  }
+
+  void _refreshData() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.invalidate(recentBooksProvider);
-      ref.invalidate(allBooksProvider);
-      print('[HomeContent] Providers refreshed on init');
+      if (mounted) {
+        ref.invalidate(recentBooksProvider);
+        ref.invalidate(allBooksProvider);
+      }
     });
   }
 
@@ -301,20 +320,26 @@ class _HomeContentState extends ConsumerState<_HomeContent> {
   }
 }
 
-class _BookCard extends StatelessWidget {
+class _BookCard extends ConsumerWidget {
   final BookEntity book;
   final bool isRecent;
 
   const _BookCard({required this.book, this.isRecent = false});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     // Calculate progress
     final double progress = book.progress;
     final double displayProgress = progress > 0 ? progress : 0.0;
 
     return GestureDetector(
-      onTap: () => context.push('/reader/${book.id}'),
+      onTap: () async {
+        // Navigate to reader and wait for it to complete
+        await context.push('/reader/${book.id}');
+        // Refresh data when returning from reader
+        ref.invalidate(recentBooksProvider);
+        ref.invalidate(allBooksProvider);
+      },
       child: Container(
         width: isRecent ? 160 : null, // Wider for recent to fit progress
         margin: isRecent ? const EdgeInsets.only(right: 20) : null,
